@@ -85,6 +85,25 @@ bool check_buttons(void)
     _printf("Initial GPIO state: %x, OE: %x\n", gpio_ini, *(uint32_t*)0x60000314);
     gpio_ini &= gpio_mask;
 
+    long length = *((long *)(RTCMEM_BASE+512+16))
+    _printf("Length: %d\n",length);
+
+/*    _printf("Memory: ");
+    int i;
+    char v;
+    for(i=0; i<512; i++) {
+        v=((char *)(RTCMEM_BASE+512+20))[i];
+        if(v>=32 && v<128)
+            _printf("%c",v);
+    }
+    _printf("\n");*/
+
+    // check if magic word in memory
+    if( ! strncmp(RTCMEM_BASE+512+20, "yaotaota", 8) ) {
+        return true; // trigger ota-boot
+    }
+
+
     bool ota = false;
     int ms_delay = gpio_wait_ms;
     uint32_t ticks = ticks_cpu();
