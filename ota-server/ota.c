@@ -25,7 +25,8 @@
  */
 
 #include <stdio.h>
-#include "lwip/udp.h"
+#include "lwip/tcp.h"
+#include "lwip/init.h"
 #include "lwip/timers.h"
 #include "ets_alt_task.h"
 #include "user_interface.h"
@@ -36,27 +37,19 @@
 
 #define OTA_START MAIN_APP_OFFSET
 
-#define CHECK(v) if (v != ERR_OK) printf(#v ": err\n")
-
-struct pkt_seq {
-    uint32_t seq;
-} __attribute__((packed));
-
-struct pkt_header {
-    uint16_t op;
-    uint16_t len;
-    uint32_t offset;
-    char data[0];
-} __attribute__((packed));
+#define CHECK(v)     \
+    if (v != ERR_OK) \
+    printf(#v ": err\n")
 
 static uint8_t MOD[] = MODULUS;
 #define RSA_BLK_SIZE (sizeof(MOD) - 1)
+#define OFFSET_TYPE uint32_t
+#define PKT_OFFSET_SIZE sizeof(OFFSET_TYPE)
 
-static uint32_t ota_offset, ota_prev_offset;
-static int dup_pkt;
+static OFFSET_TYPE ota_offset;
 static uint32_t session_start_time;
 static uint32_t last_pkt_time;
-static RSA_CTX *rsa_ctx = NULL;
+static RSA_CTX *rsa_context = NULL;
 
 static char buf[4096];
 static int buf_sz;
@@ -64,174 +57,351 @@ static int buf_sz;
 #define AES_BLK_SIZE 16
 uint8_t AES_IV[AES_BLK_SIZE] = {0};
 
+#define SOCKET struct tcp_pcb *
 
-static void buf_init(void) {
+static void buf_init(void)
+{
     buf_sz = 0;
     memset(buf, 0xff, sizeof(buf));
 }
 
 #define MP_FASTCODE(n) __attribute__((section(".iram0.text." #n))) n
 
-void MP_FASTCODE(write_buf)(void) {
-    if (buf_sz > 0) {
-#if 0
-        printf("Would write %d bytes of buf\n", buf_sz);
-#else
+void MP_FASTCODE(write_buf)(void)
+{
+    if (buf_sz > 0)
+    {
         uint32_t off = OTA_START + ota_offset;
-        if (off & (4096 - 1)) {
+        if (off & (4096 - 1))
+        {
             off &= ~(4096 - 1);
-        } else {
+        }
+        else
+        {
             off -= 4096;
         }
         printf("Writing %d bytes of buf to %x\n", buf_sz, off);
         SPIEraseSector(off / 4096);
         SPIWrite(off, buf, sizeof(buf));
-#endif
     }
     buf_init();
 }
 
-static void session_init(void) {
-    dup_pkt = 0;
+static void session_init(void)
+{
     ota_offset = 0;
-    ota_prev_offset = -1;
     session_start_time = system_get_time();
 }
 
-static void ota_udp_incoming(void *arg, struct udp_pcb *upcb, struct pbuf *p, ip_addr_t *addr, u16_t port) {
+void timer_handler(void *arg)
+{
+    // printf("tick\n");
 
-    printf("UDP incoming from: %x:%d, data=%p\n", (unsigned)addr->addr, port, p->payload);
-    uint32_t start_time = system_get_time();
-
-    if (p->len < sizeof(struct pkt_header)) {
-        printf("Packet too short\n");
-        goto done;
-    }
-
-    struct pkt_seq *pkt = p->payload;
-    printf("Pkt id: %x\n", pkt->seq);
-
-    uint8_t sig_payload[RSA_BLK_SIZE];
-    uint8_t *sig = (uint8_t*)p->payload + p->len - RSA_BLK_SIZE;
-    int sig_sz = RSA_decrypt(rsa_ctx, sig, sig_payload, sizeof(sig_payload), 0);
-    if (sig_sz != SHA1_SIZE + AES_BLK_SIZE) {
-        printf("Invalid digest size in signature\n");
-        goto done;
-    }
-
-    struct pkt_header *hdr = (struct pkt_header*)((char*)p->payload + 4);
-
-    SHA1_CTX sha_ctx;
-    SHA1_Init(&sha_ctx);
-    SHA1_Update(&sha_ctx, (uint8_t*)hdr, p->len - RSA_BLK_SIZE - 4);
-    uint8_t digest[SHA1_SIZE];
-    SHA1_Final(digest, &sha_ctx);
-
-    if (memcmp(digest, sig_payload + AES_BLK_SIZE, sizeof(digest)) != 0) {
-        printf("Invalid SHA1\n");
-        goto done;
-    }
-
-#if 0
-    AES_CTX aes_ctx;
-    AES_set_key(&aes_ctx, sig_payload, AES_IV, AES_MODE_128);
-    AES_convert_key(&aes_ctx);
-    AES_cbc_decrypt(&aes_ctx, (uint8_t*)hdr, (uint8_t*)hdr, p->len - RSA_BLK_SIZE - 4);
-#endif
-
-    printf("offset: %d len: %d\n", hdr->offset, hdr->len);
-
-    if (hdr->len == 0) {
-        write_buf();
-        printf("OTA finished, rexmits: %d\n", dup_pkt);
-        pbuf_free(p);
+    if (ota_offset > 0 && system_get_time() - last_pkt_time > PKT_WAIT_MS * 1000)
+    {
+        printf("Next pkt wait timeout, rebooting\n");
         session_init();
-
-        //udp_remove(upcb);
-        printf("Rebooting\n");
         system_restart();
-
-        return;
     }
 
-    if (hdr->offset == ota_prev_offset) {
-        // Client apparently didn't receive our confirmation
-        // and went to resend the packet we already processed -
-        // resend the confirmation.
-        dup_pkt++;
-        goto confirm;
-    }
-
-    if (hdr->offset != ota_offset) {
-        printf("Unexpected offset\n");
-        goto done;
-    }
-    if (buf_sz + hdr->len > sizeof(buf)) {
-        printf("Buffer overflow - wrong chunk size\n");
-        goto done;
-    }
-    memcpy(buf + buf_sz, hdr->data, hdr->len);
-    ota_prev_offset = ota_offset;
-    ota_offset += hdr->len;
-    buf_sz += hdr->len;
-
-    printf("Proc1 time: %d\n", system_get_time() - start_time);
-
-    if (buf_sz == sizeof(buf)) {
-        write_buf();
-    }
-
-confirm: {
-      struct pbuf *resp = pbuf_alloc(PBUF_TRANSPORT, sizeof(struct pkt_seq) + AES_BLK_SIZE, PBUF_RAM);
-      *(uint32_t*)resp->payload = pkt->seq;
-      uint8_t *encblk = (uint8_t*)resp->payload + 4;
-      memcpy(encblk, hdr, sizeof(struct pkt_header));
-#if 0
-      AES_set_key(&aes_ctx, sig_payload, AES_IV, AES_MODE_128);
-      AES_cbc_encrypt(&aes_ctx, encblk, encblk, AES_BLK_SIZE);
-#endif
-
-      CHECK(udp_sendto(upcb, resp, addr, port));
-      pbuf_free(resp);
-    }
-
-    last_pkt_time = system_get_time();
-
-done:
-    printf("Full time: %d\n", system_get_time() - start_time);
-    pbuf_free(p);
-}
-
-void timer_handler(void *arg) {
-    //printf("tick\n");
-
-    if (ota_prev_offset != -1 && system_get_time() - last_pkt_time > PKT_WAIT_MS * 1000) {
-        printf("Next pkt wait timeout, restarting recv\n");
-        session_init();
-    }
-
-    if (ota_prev_offset == -1 && system_get_time() - session_start_time > IDLE_REBOOT_MS * 1000) {
+    if (ota_offset == 0 && system_get_time() - session_start_time > IDLE_REBOOT_MS * 1000)
+    {
         printf("OTA start timeout, rebooting\n");
+        session_init();
         system_restart();
     }
+    check_for_ap_clients();
 
     sys_timeout(1000, timer_handler, NULL);
 }
+void close_connection(SOCKET socket)
+{
+    printf("Closing connection\n");
+    tcp_arg(socket, NULL);
+    tcp_sent(socket, NULL);
+    tcp_recv(socket, NULL);
+    tcp_err(socket, NULL);
+    tcp_poll(socket, NULL, 0);
+    tcp_close(socket);
+    wifi_station_set_reconnect_policy(true);
+}
 
-void ota_start(void) {
+err_t message_sent(void *arg, SOCKET socket, uint16_t len)
+{
+    if (len != PKT_OFFSET_SIZE)
+    {
+        printf("Message not fully sent to remote client\n");
+    }
+    return ERR_OK;
+}
+err_t tcp_data_received(void *arg, SOCKET socket, struct pbuf *p, err_t error)
+{
+    if (error != ERR_OK)
+        printf("Data received\ncode: %d\n", error);
+
+    if (p == NULL)
+    {
+        // connection has been closed
+        // set null all the callbacks associated with socket
+        printf("Connection closed by client\n");
+        close_connection(socket);
+    }
+    else
+    {
+        printf("Received data (%u/%u)\n", p->len, p->tot_len);
+        last_pkt_time = system_get_time();
+        // The package size must be at least the size of the 2 (uint16_t, the packet len) + signature
+        if (p->len < PKT_OFFSET_SIZE + RSA_BLK_SIZE)
+        {
+            printf("Invalid package length: minimum %u", PKT_OFFSET_SIZE + RSA_BLK_SIZE);
+        }
+        else
+        {
+            uint16_t payload_size = p->len - RSA_BLK_SIZE;
+            uint16_t calculated_data_size = payload_size - PKT_OFFSET_SIZE;
+            printf("Calculated data size: %u\n", calculated_data_size);
+            uint8_t *data_pointer = p->payload + PKT_OFFSET_SIZE;
+            uint8_t *rsa_block_pointer = data_pointer + calculated_data_size;
+            uint8_t aes_and_hash[RSA_BLK_SIZE]; // p.payload[-RSA_BLK_SIZE:]
+            uint8_t *hash_pointer = aes_and_hash + AES_BLK_SIZE;
+            int original_data_size = RSA_decrypt(rsa_context, rsa_block_pointer, aes_and_hash, RSA_BLK_SIZE, 0); // verify only?
+            if (original_data_size != AES_BLK_SIZE + SHA1_SIZE)
+            {
+                printf("Invalid hash size in signature\n");
+            }
+            else
+            {
+                //printf("Valid hash size in signature\n");
+                SHA1_CTX sha_context;
+                SHA1_Init(&sha_context);
+                SHA1_Update(&sha_context, (uint8_t *)p->payload, payload_size);
+                uint8_t calculated_hash[SHA1_SIZE];
+                SHA1_Final(calculated_hash, &sha_context);
+
+                // compare hash of message with calculated message hash
+                if (memcmp(calculated_hash, hash_pointer, SHA1_SIZE) != 0)
+                {
+                    printf("Invalid SHA1\n");
+                }
+                else
+                {
+                    //printf("Valid SHA1\n");
+
+                    // using this horrible thing here as
+                    // OFFSET_TYPE received_offset = *(OFFSET_TYPE*)p->payload;
+                    // was throwing a
+                    // Fatal exception 9(LoadStoreAlignmentCause)
+                    OFFSET_TYPE temp[0];
+                    ((uint8_t *)temp)[0] = ((uint8_t *)p->payload)[0];
+                    ((uint8_t *)temp)[1] = ((uint8_t *)p->payload)[1];
+                    ((uint8_t *)temp)[2] = ((uint8_t *)p->payload)[2];
+                    ((uint8_t *)temp)[3] = ((uint8_t *)p->payload)[3];
+                    OFFSET_TYPE received_offset = temp[0];
+                    if (ota_offset + calculated_data_size != received_offset)
+                    {
+                        printf("Invalid data offset\nCalculated: %u\nReceived:   %u\n", ota_offset + calculated_data_size, received_offset);
+                        // resend ota_offset
+                        uint16_t max_size = tcp_sndbuf(socket); // may not be used, as we only need to send 4 bytes
+                        tcp_write(socket, &ota_offset, PKT_OFFSET_SIZE, TCP_WRITE_FLAG_COPY);
+                        tcp_output(socket);
+                    }
+                    else
+                    {
+                        printf("Received offset: %u\n", received_offset);
+                        if (calculated_data_size == 0)
+                        {
+                            printf("Buffer write\n");
+                            write_buf();
+                            printf("End of OTA. Booting new firmware\n\n\n\n");
+                            session_init();
+                            wifi_station_set_reconnect_policy(true);
+
+#ifdef OTAOTA
+                            printf("Setting magic word in RTC memory\n\n\n");
+                            // set RTC memory to trigger normal OTA
+                            long *userrtc = (long *)(0x60001000 + 512 + 20);
+                            userrtc[0] = 0x746f6179;
+                            userrtc[1] = 0x61746f61;
+                            printf("Done!\n");
+#endif
+                            system_restart();
+                        }
+                        else
+                        {
+                            if (buf_sz + calculated_data_size > sizeof(buf))
+                            {
+                                int bytes_to_complete = sizeof(buf) - buf_sz;
+                                memcpy(buf + buf_sz, data_pointer, bytes_to_complete);
+                                ota_offset += bytes_to_complete;
+                                buf_sz += bytes_to_complete;
+
+                                printf("Buffer write\n");
+                                write_buf();
+
+                                int remaining = calculated_data_size - bytes_to_complete;
+                                memcpy(buf, data_pointer + bytes_to_complete, remaining);
+                                ota_offset += remaining;
+                                buf_sz += remaining;
+                            }
+                            else
+                            {
+                                memcpy(buf + buf_sz, data_pointer, calculated_data_size);
+                                ota_offset += calculated_data_size;
+                                buf_sz += calculated_data_size;
+                            }
+                            printf("Buffer size: %u\n", buf_sz);
+
+                            uint16_t max_size = tcp_sndbuf(socket); // may not be used, as we only need to send 4 bytes
+                            tcp_write(socket, &ota_offset, PKT_OFFSET_SIZE, TCP_WRITE_FLAG_COPY);
+                            tcp_output(socket);
+
+                            if (buf_sz == sizeof(buf))
+                            {
+                                printf("Buffer write\n");
+                                write_buf();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        pbuf_free(p);
+        tcp_recved(socket, p->len);
+        printf("\n\n");
+    }
+    return ERR_OK;
+}
+err_t connection_poll(void *arg, SOCKET socket)
+{
+    //printf("Polling\n");
+    return ERR_OK;
+}
+void check_for_ap_clients()
+{
+    if (wifi_softap_get_station_num() > 0)
+    {
+        printf("There are clients connected to softAP. Disabling auto reconnect\nClients: %u\n", wifi_softap_get_station_num());
+        wifi_station_set_reconnect_policy(false);
+    }
+    else
+    {
+        wifi_station_set_reconnect_policy(true);
+    }
+}
+void connection_error(void *arg, err_t error)
+{
+    printf("\n----\nError!\n----\ncode: %d\n", error);
+    wifi_station_set_reconnect_policy(true);
+}
+err_t tpc_client_accepted(void *arg, SOCKET socket, err_t error)
+{
+    printf("Client accepted\ncode: %d\n", error);
+    // arg is not used as tcp_arg wasn't called
+
+    check_for_ap_clients();
+
+    // callback for data received
+    tcp_recv(socket, tcp_data_received);
+
+    // callback for polling
+    tcp_poll(socket, connection_poll, 2 * 5);
+
+    // callback for error
+    tcp_err(socket, connection_error);
+
+    // callback for message sent ack
+    tcp_sent(socket, message_sent);
+
+    uint16_t version[3] = {VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH}; // 6bytes
+    tcp_write(socket, version, 6, TCP_WRITE_FLAG_COPY);
+    tcp_output(socket);
+
+    return ERR_OK;
+}
+
+void ota_start(void)
+{
+
+#ifdef OTAOTA
+    printf("starting OTAOTA-TCP\n");
+
+    long *userrtc = (long *)(0x60001000 + 512 + 20);
+    printf("Enabling normal OTA on next boot\n");
+    userrtc[0] = 0x746f6179;
+    userrtc[1] = 0x61746f61;
+#else
+    printf("starting OTA-TCP\n");
+#endif
+
+    printf("Version %d.%d.%d\n", VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH);
+
     session_init();
     buf_init();
 
-    RSA_pub_key_new(&rsa_ctx, MOD, sizeof(MOD) - 1, (uint8_t*)"\x03", 1);
-    printf("rsa_ctx = %p\n", rsa_ctx);
+    RSA_pub_key_new(&rsa_context, MOD, sizeof(MOD) - 1, (uint8_t *)"\x03", 1);
+    printf("rsa_context = %p\n", rsa_context);
 
-    struct udp_pcb *sock = udp_new();
-    CHECK(udp_bind(sock, IP_ADDR_ANY, 8266));
-    udp_recv(sock, ota_udp_incoming, NULL);
+    printf("Initializing lwip\n");
+    lwip_init();
+
+    printf("Check timeouts\n");
+    // lwip timeout check
+    sys_check_timeouts();
+
+    printf("Creating socket\n");
+    // create new connection control block?
+    SOCKET tcp_socket = tcp_new();
+
+    if (tcp_socket == NULL)
+    {
+        printf("Socket creation failed\n");
+        // no memory available for allocation of connection control block
+    }
+    else
+    {
+        printf("Socket created. Binding\n");
+        // bind the address to the block
+
+#ifdef OTAOTA
+        err_t error_code = tcp_bind(tcp_socket, IPADDR_ANY, 8268);
+#else
+        err_t error_code = tcp_bind(tcp_socket, IP_ADDR_ANY, 8267);
+#endif
+
+        if (error_code == ERR_USE)
+        {
+            // port already in use
+
+            printf("Address already in use\n");
+        }
+        else
+        {
+            printf("Bound\n");
+            // port is available. error_code = ERR_OK
+
+            // sets the socket to listen mode. Deallocates old
+            // socket and allocates new one that is smaller
+            tcp_socket = tcp_listen(tcp_socket);
+            if (tcp_socket == NULL)
+            {
+                printf("Socket failed to setup in listen mode\n");
+                // no memory available for allocation of new
+                // socket. old tcp_socket has not been
+                // deallocated in this case, causing memory
+                // leak
+            }
+            else
+            {
+                printf("Socket in listen mode\n");
+                tcp_accept(tcp_socket, tpc_client_accepted);
+            }
+        }
+    }
 
     sys_timeout(1000, timer_handler, NULL);
 
-    while (1) {
+    while (1)
+    {
         ets_loop_iter();
     }
 }

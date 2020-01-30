@@ -9,7 +9,15 @@
 // Offset of the main application (one which will undergo OTA update)
 // Default start of OTA region == size of boot8266 + ota-server, aligned
 // (size of yaota8266.bin as produced by the top-level Makefile).
+#ifdef OTAOTA
+#define MAIN_APP_OFFSET 0x01000
+#else
 #define MAIN_APP_OFFSET 0x3c000
+#endif
+
+#define VERSION_MAJOR 2
+#define VERSION_MINOR 0
+#define VERSION_PATCH 0
 
 // Baud rate for serial output. Set to 0 to not set baud rate explicitly,
 // which them will be the default 74880.
@@ -21,7 +29,7 @@
 
 // How long to wait for next expected packet before assuming that
 // transfer is broken and restart reception from beginning.
-#define PKT_WAIT_MS 10000
+#define PKT_WAIT_MS 30000
 
 // If first OTA packet isn't received during this time, reboot. This
 // protects against being stuck in OTA mode if entered by accident.

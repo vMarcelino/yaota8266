@@ -1,0 +1,10 @@
+.vscode
+__pycache__
+*.bin
+*.o
+*.a
+*.pyc
+*.elf
+boot8266/boot8266
+config.h
+ota-client/priv.key
