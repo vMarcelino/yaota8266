@@ -5,6 +5,9 @@ __pycache__
 *.a
 *.pyc
 *.elf
+*.cap
+*.log
+*.map
 boot8266/boot8266
 config.h
 ota-client/priv.key
