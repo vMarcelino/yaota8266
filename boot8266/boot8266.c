@@ -247,7 +247,7 @@ void start()
     if (ota)
     {
         _printf("Running OTA\n");
-        boot_location = 0x1000; // is it always here?? is boot8266 always 4096 bytes?
+        boot_location = 0x1000; // is it always here?? is boot8266 always 4096 bytes? yep
     }
     else
     {
