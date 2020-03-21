@@ -9,5 +9,4 @@ __pycache__
 *.log
 *.map
 boot8266/boot8266
-config.h
 ota-client/priv.key
