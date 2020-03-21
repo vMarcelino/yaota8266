@@ -149,7 +149,7 @@ bool check_main_app(void)
     MD5Init(&ctx);
 
     uint32_t read_offset = MAIN_APP_OFFSET;
-    uint32_t sz = 0; // size in bytes of what?
+    uint32_t sz = 0; // size in bytes of flash + rom (in this case flash is always 0x9000)
 
     // read last 4 bytes (32bits) of
     // 36864 bytes (36kB) ahead from 
