@@ -6,11 +6,15 @@ SEGS_MAX_SIZE = 0x9000
 
 assert len(sys.argv) == 4
 
+output_file = sys.argv[3]
+flash_file = sys.argv[1]
+rom_file = sys.argv[2]
+
 md5 = hashlib.md5()
 
-with open(sys.argv[3], 'wb') as fout:
+with open(output_file, 'wb') as fout:
 
-    with open(sys.argv[1], 'rb') as f:
+    with open(flash_file, 'rb') as f:
         data_flash = f.read()
         fout.write(data_flash)
         # First 4 bytes include flash size, etc. which may be changed
@@ -18,14 +22,16 @@ with open(sys.argv[3], 'wb') as fout:
         md5.update(data_flash[4:])
         print('flash    ', len(data_flash))
 
-    with open(sys.argv[2], 'rb') as f:
+    with open(rom_file, 'rb') as f:
         data_rom = f.read()
 
+    print('pad len:', (SEGS_MAX_SIZE - len(data_flash)))
     pad = b'\xff' * (SEGS_MAX_SIZE - len(data_flash))
+    print('pad len:', len(pad))
     assert len(pad) >= 4
     fout.write(pad[:-4])
     md5.update(pad[:-4])
-    len_data = struct.pack("I", SEGS_MAX_SIZE + len(data_rom))
+    len_data = struct.pack("I", SEGS_MAX_SIZE + len(data_rom)) # uint32
     fout.write(len_data)
     md5.update(len_data)
     print('padding  ', len(pad))
