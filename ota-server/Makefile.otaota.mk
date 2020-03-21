@@ -9,7 +9,7 @@ LDFLAGS = -nostdlib -T./otaota.ld -gc-sections -Map=$@.map --cref
 otaota-0x00000.bin: otaota.elf
 	esptool.py elf2image $^
 
-otaota.elf: ota.o main.o ets_alt_task.o | libaxtls.a
+otaota.elf: ota.o main.o ets_alt_task.o esp_init_data.o | libaxtls.a
 	$(LD) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
 libaxtls.a:

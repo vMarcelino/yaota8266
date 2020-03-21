@@ -1,15 +1,15 @@
 all:
-	make default
 	make ota
+	make otaota
 
-
-default:
-	rm -f *.o
-	make -f Makefile.default
 
 ota:
-	rm -f *.o
-	make -f Makefile.ota
+	rm -f ota.o
+	make -f Makefile.ota.mk
+
+otaota:
+	rm -f ota.o
+	make -f Makefile.otaota.mk
 
 clean:
 	rm -f *.o *.a *.elf* *-0x*.bin
