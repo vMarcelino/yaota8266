@@ -12,7 +12,7 @@ def load_key(log=print):
         elif l.startswith("    "):
             comps[last_comp] = comps.get(last_comp, "") + l.lstrip()
 
-    log(comps)
+    #log(comps)
     return comps
 
 
