@@ -54,9 +54,6 @@ static RSA_CTX *rsa_context = NULL;
 static char buf[4096];
 static int buf_sz;
 
-#define AES_BLK_SIZE 16
-uint8_t AES_IV[AES_BLK_SIZE] = {0};
-
 #define SOCKET struct tcp_pcb *
 
 static void buf_init(void)
@@ -130,14 +127,14 @@ err_t message_sent(void *arg, SOCKET socket, uint16_t len)
 {
     if (len != PKT_OFFSET_SIZE)
     {
-        printf("Message not fully sent to remote client\n");
+        printf("Message not fully sent to remote client:\n    sent %d, expected %d\n", len, PKT_OFFSET_SIZE);
     }
     return ERR_OK;
 }
 err_t tcp_data_received(void *arg, SOCKET socket, struct pbuf *p, err_t error)
 {
     if (error != ERR_OK)
-        printf("Data received\ncode: %d\n", error);
+        printf("Data received\n    code: %d\n", error);
 
     if (p == NULL)
     {
@@ -157,17 +154,21 @@ err_t tcp_data_received(void *arg, SOCKET socket, struct pbuf *p, err_t error)
         }
         else
         {
+            // payload = (uint32)offset + data
             uint16_t payload_size = p->len - RSA_BLK_SIZE;
+
+            // data size = payload size - 4 (from 4 bytes of uint32)
             uint16_t calculated_data_size = payload_size - PKT_OFFSET_SIZE;
             printf("Calculated data size: %u\n", calculated_data_size);
-            uint8_t *data_pointer = p->payload + PKT_OFFSET_SIZE;
-            uint8_t *rsa_block_pointer = data_pointer + calculated_data_size;
-            uint8_t aes_and_hash[RSA_BLK_SIZE]; // p.payload[-RSA_BLK_SIZE:]
-            uint8_t *hash_pointer = aes_and_hash + AES_BLK_SIZE;
-            int original_data_size = RSA_decrypt(rsa_context, rsa_block_pointer, aes_and_hash, RSA_BLK_SIZE, 0); // verify only?
-            if (original_data_size != AES_BLK_SIZE + SHA1_SIZE)
+
+            uint8_t *data_pointer = p->payload + PKT_OFFSET_SIZE; // data start = payload start + 4
+            uint8_t *rsa_block_pointer = data_pointer + calculated_data_size; // sig start = data start + data size
+            uint8_t decrypted_signature[RSA_BLK_SIZE]; // p.payload[-RSA_BLK_SIZE:]
+            uint8_t *hash_pointer = decrypted_signature;
+            int decrypted_data_size = RSA_decrypt(rsa_context, rsa_block_pointer, decrypted_signature, RSA_BLK_SIZE, 0); // verify only?
+            if (decrypted_data_size != SHA1_SIZE)
             {
-                printf("Invalid hash size in signature\n");
+                printf("Invalid hash size in signature\n    got: %d, expected: %d", decrypted_data_size, SHA1_SIZE);
             }
             else
             {
@@ -295,7 +296,7 @@ void connection_error(void *arg, err_t error)
 }
 err_t tpc_client_accepted(void *arg, SOCKET socket, err_t error)
 {
-    printf("Client accepted\ncode: %d\n", error);
+    printf("Client accepted (code: %d)\n", error);
     // arg is not used as tcp_arg wasn't called
 
     check_for_ap_clients();
@@ -312,7 +313,7 @@ err_t tpc_client_accepted(void *arg, SOCKET socket, err_t error)
     // callback for message sent ack
     tcp_sent(socket, message_sent);
 
-    uint16_t version[3] = {VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH}; // 6bytes
+    uint16_t version[3] = {VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH}; // 6 bytes
     tcp_write(socket, version, 6, TCP_WRITE_FLAG_COPY);
     tcp_output(socket);
 
