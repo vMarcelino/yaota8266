@@ -10,3 +10,5 @@ __pycache__
 *.map
 boot8266/boot8266
 ota-client/priv.key
+local.*
+.local.*
