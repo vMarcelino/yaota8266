@@ -59,10 +59,10 @@ __attribute__((always_inline)) static inline uint32_t ticks_cpu(void)
 
 struct flash_header
 {
-    uint8_t sig;
-    uint8_t num;
-    uint8_t par1;
-    uint8_t par2;
+    uint8_t sig; // 
+    uint8_t num; // 
+    uint8_t par1; // flash mode
+    uint8_t par2; // flash size
     uint32_t start;
 };
 
@@ -276,7 +276,7 @@ boot:
         SPIRead(boot_location, &header.sect, sizeof(header.sect));
         boot_location += sizeof(header.sect);
         //_printf("read_offset: %x addr: %x size: %x\n", offset, header.sect.addr, header.sect.size);
-        if (header.sect.addr >= (void *)0x40100000 && header.sect.addr < (void *)0x40108000)
+        if ((void *)0x40100000 <= header.sect.addr && header.sect.addr < (void *)0x40108000)
         {
             //_printf("skip iram\n");
             iram_offset = boot_location;
